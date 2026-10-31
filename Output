@@ -1,0 +1,141 @@
+// =====================================================================
+// MASTER COPY - OUTPUT TAB
+// E.V.E.R. (game systems) + Cliffhangar (endings)
+//
+// Paste this whole file into the Output tab.
+// Runs after every AI response, including Continue and Retry.
+// =====================================================================
+
+const modifier = (text) => {
+  //--------- CLIFFHANGAR CONFIG (edit here) -------------------
+  // Each entry: trigger phrase -> { banner, message } for that specific ending flavor.
+  // Follow this structure, and add \n\n to the start of each banner.
+  const config = {
+    outputTriggers: {
+      "transmission plays": {
+        banner: "\n\n[LOG ENTRY TERMINATED. A TRANSMISSION HAS BEEN INTERCEPTED. THE ARCHIVE CONTINUES ELSEWHERE.]",
+        message: "LOG ENTRY TERMINATED: Transmission intercepted.",
+      },
+      "beacon activates": {
+        banner: "\n\n[LOG ENTRY TERMINATED. BEACON SIGNAL DETECTED. EVENTS FOLLOWING THIS POINT ARE RECORDED IN THE NEXT ARCHIVAL ENTRY.]",
+        message: "LOG ENTRY TERMINATED: Beacon activated.",
+      },
+      "incoming message": {
+        banner: "\n\n[LOG ENTRY TERMINATED. INCOMING TRANSMISSION LOGGED. CONTINUATION ARCHIVED SEPARATELY.]",
+        message: "LOG ENTRY TERMINATED: Incoming message received.",
+      },
+      "static clears": {
+        banner: "\n\n[LOG ENTRY TERMINATED. SIGNAL STABILIZED. EVENTS FOLLOWING THIS POINT ARE RECORDED IN THE NEXT ARCHIVAL ENTRY.]",
+        message: "LOG ENTRY TERMINATED: Static cleared.",
+      },
+      "engage comms": {
+        banner: "\n\n[LOG ENTRY TERMINATED. COMMS ENGAGED. EVENTS FOLLOWING THIS POINT ARE RECORDED IN THE NEXT ARCHIVAL ENTRY.]",
+        message: "LOG ENTRY TERMINATED: Comms engaged.",
+      },
+    },
+    // Fallback used when the ending came from an INPUT trigger (state.triggerEnding)
+    defaultEnding: {
+      banner: "\n\n[LOG ENTRY TERMINATED. EVENTS FOLLOWING THIS POINT ARE RECORDED IN THE NEXT ARCHIVAL ENTRY.]",
+      message: "LOG ENTRY TERMINATED: Scenario Ended.",
+    },
+    // Used when the player dies (edit the wording to taste)
+    deathEnding: {
+      banner: "\n\n[VITAL SIGNS LOST. THE SURVIVOR HAS FALLEN. THIS RECORD IS CLOSED.]",
+      message: "YOU HAVE DIED: Scenario Ended.",
+    },
+  };
+  //------------------------------------------------------------
+
+  // ---------- E.V.E.R. ----------
+  // Remember whether the player was ALREADY dead before this turn.
+  // (Checked before anything below runs, so a death this turn waits until next turn.)
+  const alreadyDead = !!(state.ever && state.ever.dead);
+
+  if (state.ever) {
+    // The AI has had its chance to narrate anything waiting, so clear the notes
+    state.ever.pendingChest = null;
+    state.ever.pendingEvent = null;
+    state.ever.pendingDeath = null;
+
+    // Only count each turn once (Retry reuses the same action number).
+    // Once the player is dead, everything below is frozen.
+    if (!state.ever.dead && state.ever.lastTickedAction !== info.actionCount) {
+      state.ever.lastTickedAction = info.actionCount;
+
+      everSurvivalTick();   // drain thirst and hunger, maybe hurt health, maybe regenerate
+
+      // Collect kill drops from what the AI just wrote
+      const notes = [];
+      // Timed chests, salvage and events now roll in the Context tab (everPreRolls),
+      // so the AI narrates them the same turn. The old Output-tab versions are disabled:
+      // if (everChestTick()) notes.push(state.ever.lastLoot);
+      // if (state.ever.pendingSalvage) {
+      //   state.ever.pendingSalvage = false;
+      //   const hauls = everSalvageRun();
+      //   for (let i = 0; i < hauls.length; i++) notes.push(hauls[i]);
+      // }
+
+      everRecordKills(text);                                  // keep the total that kill quests count
+      const kills = everKillTick(text);                       // kills in the AI's text
+      for (let i = 0; i < kills.length; i++) notes.push(kills[i]);
+
+      // Show a banner, and save a note for the AI to narrate next turn
+      if (notes.length > 0) {
+        state.message = "Loot! " + notes.join(" | ");
+        state.ever.pendingChest = notes.join("; ");
+      }
+
+      // Old event roll, disabled (events now roll in the Context tab):
+      // const ev = everEventTick();
+      // if (ev) {
+      //   state.message = "Event: " + ev.name + (ev.results.length > 0 ? " (" + ev.results.join(", ") + ")" : "");
+      //   state.ever.pendingEvent = "Event: " + ev.name + ". " + ev.prompt +
+      //     (ev.results.length > 0 ? " Effects on the player: " + ev.results.join(", ") + "." : "");
+      // }
+
+      // Did the player die this turn?
+      if (everDeathCheck()) {
+        state.message = "You have died.";
+        state.ever.pendingDeath = true;   // the Context tab tells the AI next turn
+      }
+
+      everRenderCards();
+    }
+  }
+
+  // If the player died on an EARLIER turn, the AI has now narrated the death,
+  // so queue the ending for Cliffhangar below.
+  if (alreadyDead && !state.ended) {
+    state.triggerEnding = true;
+    state.triggerName = "death";
+  }
+
+  // ---------- CLIFFHANGAR ----------
+  const lowerText = text.toLowerCase();
+
+  // Find the first matching output trigger, using word boundaries to avoid false positives
+  const matchedKey = Object.keys(config.outputTriggers).find(phrase =>
+    new RegExp(`\\b${phrase.toLowerCase()}\\b`).test(lowerText)
+  );
+
+  if (state.triggerEnding || matchedKey) {
+    // Pick which ending to play: a phrase the AI wrote, then death, then the default
+    let ending;
+    if (matchedKey) {
+      ending = config.outputTriggers[matchedKey];
+    } else if (state.triggerName === "death") {
+      ending = config.deathEnding;
+    } else {
+      ending = config.defaultEnding;
+    }
+
+    text = text.trim() + ending.banner;
+    state.ended = true;
+    state.triggerEnding = false;
+    state.triggerName = null;
+    state.message = ending.message;
+  }
+
+  return { text };
+};
+modifier(text);
