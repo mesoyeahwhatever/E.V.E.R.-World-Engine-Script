@@ -1,0 +1,172 @@
+// =====================================================================
+// MASTER COPY - INPUT TAB
+// E.V.E.R. (player commands) + Cliffhangar (input triggers)
+//
+// Paste this whole file into the Input tab.
+// Runs every time the player submits an action.
+//
+// NOTE: in testing, returning "stop: true" from this tab caused the error
+// "Unable to run scenario scripts". So the E.V.E.R. commands below do NOT use it.
+// Instead, each command does its work here, shows the result as a banner,
+// and swaps the player's text for a short line of story so the AI keeps going.
+// =====================================================================
+
+const modifier = (text) => {
+  //--------- CLIFFHANGAR CONFIG (edit here) -------------------
+  const config = {
+    // Phrases that, if the PLAYER types them, queue the ending
+    inputTriggers: ["example a", "example b"],
+    // Message shown once the scenario has already ended
+    endedMessage: "Scenario Ended.",
+  };
+  //------------------------------------------------------------
+
+  // If the ending already fired, block further generation permanently.
+  // This comes first so nothing else (including commands) works after the end.
+  if (state.ended) {
+    state.message = config.endedMessage;
+    return { text, stop: true };
+  }
+
+  // ---------- E.V.E.R. commands ----------
+  // First, see whether the player answered a quest offer on the Quests card
+  everReadQuestCard();
+
+  // typed = what the player wrote, trimmed and lowercased so "/Upgrade " still works
+  const typed = text.trim().toLowerCase();
+
+  // Upgrade command: spend materials to level up the base
+  if (typed.startsWith(EVER_CONFIG.upgradeCommand)) {
+    const result = everTryUpgrade();         // does the work, returns a message
+    state.message = result;                  // banner showing what happened
+    everRenderCards();
+    // Replace the command with a line of story (different line for success vs failure)
+    if (result.indexOf("Upgraded") === 0) {
+      return { text: "You work on your " + EVER_CONFIG.baseName + ", reinforcing and expanding it." };
+    }
+    return { text: "You inspect your " + EVER_CONFIG.baseName + ", thinking about what it still needs." };
+  }
+
+  // Drink command: DISABLED, replaced by /use below (kept here in case it's needed again).
+  // Every line of the block has // in front, including the closing brace.
+  // if (typed.startsWith(EVER_CONFIG.drinkCommand)) {
+  //   const result = everTryDrink();
+  //   state.message = result;
+  //   everRenderCards();
+  //   if (result.indexOf("You drank") === 0) {
+  //     return { text: "You drink some " + EVER_CONFIG.drinkItem + "." };
+  //   }
+  //   return { text: "You think about drinking something, but there's nothing to drink right now." };
+  // }
+
+  // Use command: /use fish, /use med kit, ...
+  if (typed.startsWith(EVER_CONFIG.useCommand)) {
+    // Everything after the command word is the item name the player wants
+    const query = typed.slice(EVER_CONFIG.useCommand.length).trim();
+    const result = everTryUse(query);
+    state.message = result;
+    everRenderCards();
+    if (state.ever.lastUsed) {
+      return { text: "You use your " + state.ever.lastUsed + "." };
+    }
+    return { text: "You rummage through your supplies, thinking about what to use." };
+  }
+
+  // Engine command: build the engine, or upgrade it if it's already built
+  if (typed.startsWith(EVER_CONFIG.engine.command)) {
+    const result = everTryEngine();
+    state.message = result;
+    everRenderCards();
+    const engineName = EVER_CONFIG.engine.name;   // what this world calls it
+    if (result.indexOf(engineName + " built") === 0) {
+      return { text: "You assemble the " + engineName.toLowerCase() + " and bring it to life." };
+    }
+    if (result.indexOf(engineName + " upgraded") === 0) {
+      return { text: "You upgrade the " + engineName.toLowerCase() + ", boosting its output." };
+    }
+    return { text: "You examine the " + engineName.toLowerCase() + ", thinking about what's still missing." };
+  }
+
+  // Quest commands: /accept, /deny and /abandon
+  const questCfg = EVER_CONFIG.quests;
+  if (EVER_CONFIG.features.quests && typed.startsWith(questCfg.acceptCommand)) {
+    const result = everQuestAccept();
+    state.message = result;
+    everRenderCards();
+    if (result.indexOf("Quest accepted") === 0) return { text: "You agree to take on the job." };
+    return { text: "You think about taking on a job, but nobody is asking." };
+  }
+  if (EVER_CONFIG.features.quests && typed.startsWith(questCfg.denyCommand)) {
+    const result = everQuestDeny();
+    state.message = result;
+    everRenderCards();
+    if (result.indexOf("Quest declined") === 0) return { text: "You politely turn the offer down." };
+    return { text: "You think about turning someone down, but nobody is asking." };
+  }
+  if (EVER_CONFIG.features.quests && typed.startsWith(questCfg.abandonCommand)) {
+    const result = everQuestAbandon();
+    state.message = result;
+    everRenderCards();
+    if (result.indexOf("Quest abandoned") === 0) return { text: "You decide to give up on the job." };
+    return { text: "You think about giving up on a job, but you aren't doing one." };
+  }
+
+  // Equip command: mount a ship weapon, e.g. /equip railgun
+  if (typed.startsWith(EVER_CONFIG.weaponSlots.equipCommand)) {
+    const query = typed.slice(EVER_CONFIG.weaponSlots.equipCommand.length).trim();
+    const result = everTryEquip(query);
+    state.message = result;
+    everRenderCards();
+    if (state.ever.lastEquipped) {
+      return { text: "You mount the " + state.ever.lastEquipped + " onto your " + EVER_CONFIG.baseName + "." };
+    }
+    return { text: "You inspect your " + EVER_CONFIG.baseName + "'s weapon mounts." };
+  }
+
+  // Unequip command: take a ship weapon off its mount, e.g. /unequip railgun
+  if (typed.startsWith(EVER_CONFIG.weaponSlots.unequipCommand)) {
+    const query = typed.slice(EVER_CONFIG.weaponSlots.unequipCommand.length).trim();
+    const result = everTryUnequip(query);
+    state.message = result;
+    everRenderCards();
+    if (state.ever.lastEquipped) {
+      return { text: "You remove the " + state.ever.lastEquipped + " from its mount." };
+    }
+    return { text: "You inspect your " + EVER_CONFIG.baseName + "'s weapon mounts." };
+  }
+
+  // Test helpers (/give, /setlevel): everDebug returns null unless debugCommands is true
+  const debugResult = everDebug(typed);
+  if (debugResult !== null) {
+    state.message = debugResult;
+    everRenderCards();
+    return { text: "You pause for a moment." };
+  }
+
+  // Salvage command: becomes a real story turn
+  if (typed.startsWith(EVER_CONFIG.salvageCommand)) {
+    if (EVER_CONFIG.lootMode === "timer" || !EVER_CONFIG.features.drops) {
+      state.message = "Salvage runs aren't available in this world.";
+      return { text: "You look around for anything to salvage, but find nothing." };
+    }
+    // Roll the haul now, so the Context tab can tell the AI during this same turn
+    state.ever.salvageNote = everSalvageRun().join(", ");
+    return { text: "You head out on a salvage run, searching for anything useful." };
+  }
+
+  // ---------- Cliffhangar trigger check ----------
+  const lowerText = text.toLowerCase();
+
+  const matched = config.inputTriggers.find(word =>
+    new RegExp(`\\b${word.toLowerCase()}\\b`).test(lowerText)
+  );
+
+  if (matched) {
+    state.triggerEnding = true;
+    state.triggerName = matched; // remembered so OUTPUT can pick the right ending flavor
+  }
+
+  everRenderCards();   // keep both story cards up to date
+  return { text };
+};
+modifier(text);
