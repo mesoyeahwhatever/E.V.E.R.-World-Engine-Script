@@ -1,0 +1,37 @@
+// =====================================================================
+// MASTER COPY - CONTEXT TAB
+// E.V.E.R. (tells the AI what's going on)
+//
+// Paste this whole file into the Context tab.
+// Runs right before the AI writes. Anything added to "text" is read by the AI
+// but isn't shown in your story.
+// =====================================================================
+
+const modifier = (text) => {
+  if (state.ever) {
+    // Did the player answer a quest offer on the Quests card? (Needed here because
+    // Continue doesn't run the Input tab.)
+    everReadQuestCard();
+
+    // Always attach the current stats and inventory
+    const status = everStatusNote();
+    if (status) text = text + "\n" + status;
+
+    // Chest, event or salvage rolled THIS turn: the AI narrates it in this response
+    const note = everPreRolls();
+    if (note) text = text + "\n[" + note + "]";
+
+    // Kill drops rolled after the last response: narrated on this turn
+    if (state.ever.pendingChest) {
+      text = text + "\n[The player has just obtained loot: " + state.ever.pendingChest +
+        ". Narrate the player finding it, with exactly these contents.]";
+    }
+
+    // If the player just died, tell the AI to narrate it
+    if (state.ever.pendingDeath) {
+      text = text + "\n[" + EVER_CONFIG.deathPrompt + "]";
+    }
+  }
+  return { text };
+};
+modifier(text);
