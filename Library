@@ -1,0 +1,1723 @@
+/*
+MIT License
+
+Copyright (c) 2026 mesoyeahwhatever
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+// =====================================================================
+// E.V.E.R. (Expandable Virtual Environment Runtime)
+// MASTER COPY - LIBRARY TAB
+//
+// Paste this WHOLE file into the Library tab.
+// The Library runs before the Input, Context and Output tabs every turn,
+// so every function in here is available to all three of them.
+//
+// CONTENTS
+//   1. SETTINGS         - which world is active, shared settings, and one block per world
+//   2. HELPERS          - small tools used everywhere (random numbers, etc.)
+//   3. SETUP            - creates the live game state the first time
+//   4. STORY CARDS      - builds and updates the Engine + Inventory cards
+//   5. LOOT             - the random loot roll + timed chests
+//   6. BASE UPGRADES    - /upgrade
+//   7. SURVIVAL         - thirst, hunger, health regen, /use
+//   7b. ENGINE + POWER  - /engine, power, gated items, test commands
+//   7c. WEAPON SLOTS    - /equip and /unequip
+//   8. KILLS + SALVAGE  - drops from kills and /salvage runs
+//   9. AI AWARENESS     - the status note the AI always sees
+//  10. EVENTS           - storms, survivors, monsters...
+//  11. SAME-TURN ROLLS  - chests, events and salvage rolled before the AI writes
+//  12. DEATH            - the death flag
+// =====================================================================
+
+// log("E.V.E.R. Library loaded"); // Debug line: remove the // to see this in the console
+
+
+// =====================================================================
+// 1. SETTINGS
+// =====================================================================
+//
+// HOW THE SETTINGS WORK
+//   EVER_SHARED holds everything every world has in common.
+//   EVER_PRESETS holds one block per world, with only what makes that world different.
+//   The active world's block is laid over the shared settings to make EVER_CONFIG,
+//   which is what the rest of the script reads. A world can also override a single
+//   shared setting (even one inside "engine" or "features") by listing just that setting.
+
+// >>> CHANGE THIS WORD TO SWITCH WORLDS: "ocean" or "apocalypse" or create your own presets following this structure.<<<
+const EVER_ACTIVE_PRESET = "ocean";
+
+
+// ---------------------------------------------------------------------
+// 1a. SHARED SETTINGS (every world uses these)
+// ---------------------------------------------------------------------
+const EVER_SHARED = {
+
+  // ----- Loot -----
+  chestMin: 1,                   // fewest turns before the next chest
+  chestMax: 10,                  // most turns before the next chest
+  chestAmountMin: 1,             // fewest items a chest gives before the rank bonus
+  chestAmountMax: 3,             // most items a chest gives before the rank bonus
+  ranks: ["Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic"],
+  // One number per rank, same order as ranks above. Bigger = more common.
+  // Only the proportions matter (these add up to 102, not 100, and that's fine).
+  rankWeights: [50, 25, 15, 8, 3, 1],
+  itemClasses: ["Resource", "Weapon", "Food", "Upgrade Material"],
+  maxItemCount: 999,             // no item can ever go above this
+
+  // ----- Story cards -----
+  // Titles of the two story cards E.V.E.R. creates and keeps updated
+  cards: {
+    engine: "🌎E.V.E.R. Engine",
+    inventory: "💼E.V.E.R. Inventory",
+    quests: "📜E.V.E.R. Quests"
+  },
+
+  // ----- Base upgrades -----
+  upgradeItem: "Scrap Metal",    // (no longer used: the recipe below replaced it)
+  upgradeBaseCost: 5,            // full cost of the first upgrade (raise this once pacing feels right)
+  upgradeCostStep: 10,           // each upgrade costs this much more than the last
+  upgradeCommand: "/upgrade",    // what the player types to upgrade
+  // What every upgrade costs. Each material has a ratio: 1 = the full cost worked out from
+  // upgradeBaseCost and upgradeCostStep, 0.5 = half of it, and so on (rounded up).
+  upgradeRecipe: { "Scrap Metal": 1, "Reinforced Plating": 0.5 },
+
+  // ----- Survival: health -----
+  startHealth: 100,
+  healthRegenPerTurn: 1,         // health restored each turn
+  regenMinThirst: 0,             // regen only happens while thirst is ABOVE this number
+  lowHealth: 25,                 // at or below this, tell the AI the player is badly hurt
+
+  // ----- Survival: thirst -----
+  startThirst: 100,
+  thirstLossPerTurn: 1,          // thirst lost every turn
+  healthLossWhenDry: 5,          // health lost every turn while thirst is 0
+  lowThirst: 25,                 // at or below this, tell the AI the player is parched
+  drinkItem: "Fresh Water",      // used by the old /drink command (now disabled in Input)
+  thirstRestore: 25,             // used by the old /drink command
+  drinkCommand: "/drink",        // the old command, kept in case it's needed again
+
+  // ----- Survival: hunger -----
+  startHunger: 100,              // hunger starts full
+  hungerLossPerTurn: 1,          // hunger lost each time it drains...
+  hungerLossEvery: 2,            // ...which happens every this many turns
+  healthLossWhenStarving: 3,     // health lost every turn while hunger is 0
+  lowHunger: 25,                 // at or below this, tell the AI the player is starving
+
+  // ----- Using items -----
+  useCommand: "/use",            // what the player types: /use fish
+  // (what each item does is set per world, in "consumables" below)
+
+  // ----- Kills and salvage -----
+  // Whole words that count as an enemy kill when the AI writes them.
+  // Tune this list for your genre; it isn't perfect (e.g. "dies" could be the player).
+  killWords: ["killed", "slain", "slew", "defeated", "destroyed", "dies"],
+  killDropsPerTurnMax: 3,        // most kill drops from a single AI response
+  salvageCommand: "/salvage",    // what the player types to go salvaging
+  salvageRollsMin: 1,            // fewest items a salvage run finds
+  salvageRollsMax: 3,            // most items a salvage run finds
+
+  // ----- AI awareness -----
+  awarenessMaxItems: 10,         // most inventory items shown to the AI
+
+  // ----- Events -----
+  eventMin: 1,                   // fewest turns before the next event
+  eventMax: 15,                  // most turns before the next event
+  // (the events themselves are set per world)
+
+  // ----- Engine and power -----
+  engine: {
+    name: "Engine",              // what this world calls it (a world could use "Reactor", for example)
+    unlockBaseLevel: 3,          // the base must reach this level before it can be built
+    command: "/engine",          // builds it, and upgrades it once it exists
+    buildCost: { "Engine Part": 5 },                       // what building it costs
+    upgradeRecipe: { "Engine Part": 1, "Wiring": 0.5 },    // what each upgrade costs (ratios)
+    upgradeBaseCost: 5,          // full cost of the first upgrade
+    upgradeCostStep: 5,          // each upgrade costs this much more than the last
+    startCapacity: 50,           // maximum power at level 1 (and power starts full)
+    capacityPerLevel: 20,        // maximum power gained per extra level
+    drainPerTurn: 2,             // power lost every turn once it exists
+    refillsOnUpgrade: true,      // upgrading also refills power
+    lowPower: 20                 // at or below this, tell the AI power is running low
+  },
+
+  // Items that only start dropping once something is unlocked.
+  // "engine" means the engine has to be built first.
+  gatedItems: {
+    "Power Cell": "engine",
+    "railgun": "engine",
+    "cannon": "engine",
+    "Automated Defense Turret": "engine"
+  },
+
+  // ----- Ship weapon slots -----
+  weaponSlots: {
+    unlockBaseLevel: 3,          // the base must reach this level before it has any weapon slot
+    startSlots: 1,               // slots at that level
+    slotsPerLevel: 2,            // extra slots for every base level after that
+    equipCommand: "/equip",      // mounts a weapon:   /equip railgun
+    unequipCommand: "/unequip"   // removes a weapon:  /unequip railgun
+  },
+  // Items that count as ship-mounted weapons (they use the slots; hand weapons don't)
+  mountedWeapons: ["railgun", "cannon", "Automated Defense Turret"],
+
+  // ----- Quests -----
+  // Only one quest at a time: a new offer can only appear while nothing is waiting or active.
+  // (The quests themselves are set per world, in "questList".)
+  quests: {
+    offerMin: 10,                // fewest turns before the next quest is offered
+    offerMax: 25,                // most turns before the next quest is offered
+    offerExpiresAfter: 15,       // an offer you ignore disappears after this many turns
+    acceptCommand: "/accept",    // accept the offered quest
+    denyCommand: "/deny",        // turn the offered quest down
+    abandonCommand: "/abandon"   // give up on the quest you accepted
+  },
+
+  // ----- Testing -----
+  // While testing, set this to true to enable /give and /setlevel. Set it back to false afterwards.
+  debugCommands: false,
+
+  // ----- Death -----
+  // What the AI is told the moment the player dies
+  deathPrompt: "The player has just died. Narrate their final moments and death, and do not let the story continue as if they were alive.",
+
+  // ----- Feature switches -----
+  // Set a feature to false to turn that whole system off without deleting anything.
+  features: {
+    health: true,
+    thirst: true,
+    hunger: true,
+    chests: true,         // timed chests
+    baseUpgrades: true,
+    inventory: true,      // the Inventory story card
+    drops: true,          // kill drops and /salvage (also needs lootMode "kills" or "both")
+    aiAwareness: true,    // the status note sent to the AI each turn
+    events: true,
+    regen: true,          // health regeneration
+    engine: true,         // the engine and its power stat
+    weaponSlots: true,    // ship weapon slots (/equip and /unequip)
+    quests: true,         // quests / missions
+    death: true
+  }
+};
+
+
+// ---------------------------------------------------------------------
+// 1b. WORLD PRESETS (one block per world: only what makes it different)
+// ---------------------------------------------------------------------
+const EVER_PRESETS = {
+
+  // ===== OCEAN: the raft on the infinite ocean =====
+  ocean: {
+    worldName: "Infinite Ocean",   // the setting's name
+    baseName: "Raft",              // what the player's home is called
+    // One name per upgrade level, in order. Past the end of this list the script
+    // continues with "Ark Mk.2", "Ark Mk.3" and so on, so upgrades never run out.
+    baseTiers: ["Scrap Raft", "Reinforced Raft", "skiff", "boat", "sail boat", "yacht", "corvette", "frigate", "destroyer", "cruiser", "Ark"],
+
+    // "timer" = timed chests only, "kills" = kill drops and /salvage only, "both" = everything
+    lootMode: "timer",
+
+    // Items the player starts with, and their starting amounts (0-999)
+    items: {
+      "Wood Plank": 30,
+      "Rope": 30,
+      "Scrap Metal": 30,
+      "Fresh Water": 30,
+      "Fish": 30
+    },
+    // What each item class can drop. The class names must match itemClasses exactly.
+    // Any item listed here is added to the inventory automatically when it drops.
+    lootPools: {
+      "Resource": ["Wood Plank", "Rope", "Med Kit", "Power Cell"],
+      "Weapon": ["Harpoon", "Spear", "pistol", "SMG", "Automated Defense Turret", "Desert Eagle", "railgun", "cannon", "combat knife"],
+      "Food": ["Fish", "Coconut", "Fresh Water", "squid", "rations", "MRE's"],
+      "Upgrade Material": ["Scrap Metal", "Engine Part", "Wiring", "Reinforced Plating"]
+    },
+    // What each usable item does with /use. Effects: hunger, thirst, health, power (amounts restored).
+    // Item names must match the loot pools exactly, including lowercase ones.
+    consumables: {
+      "Fresh Water": { thirst: 25 },
+      "Coconut": { thirst: 10, hunger: 10 },
+      "Fish": { hunger: 20 },
+      "squid": { hunger: 20 },
+      "rations": { hunger: 30 },
+      "MRE's": { hunger: 50 },
+      "Med Kit": { health: 40 },
+      "Power Cell": { power: 9999 }   // fully recharges the engine (capped at its maximum)
+    },
+
+    // Each event: name, weight (bigger = more common), prompt (what the AI is told),
+    // and optional effects. Leave an effect out or set it to 0 for "none".
+    //   healthChange: change to health (negative = damage)
+    //   thirstChange: change to thirst (positive = restores)
+    //   lootRolls:    how many free loot rolls the player gets
+    events: [
+      { name: "Storm", weight: 25,
+        prompt: "A violent storm batters the player's home, testing its defenses. It is intense but short lived.",
+        healthChange: -5 },
+      { name: "Survivor", weight: 20,
+        prompt: "A lone survivor appears on a raft and offers the player a gift in exchange for joining the player's crew.",
+        lootRolls: 1 },
+      { name: "Monster Encounter", weight: 30,
+        prompt: "A dangerous monster attacks the player's home. The player fights it off, but not without injury.",
+        healthChange: -10, lootRolls: 1 },
+      { name: "Drifting Wreckage", weight: 15,
+        prompt: "Wreckage drifts into reach, full of things worth salvaging.",
+        lootRolls: 2 },
+      { name: "Heavy Rain", weight: 10,
+        prompt: "A heavy rain falls and the player collects fresh water.",
+    thirstChange: 20 }
+    ],
+
+    // Quests for this world. Each one has:
+    //   name, prompt (what the AI is told when the quest is offered),
+    //   goal   - one of these types:
+    //     { type: "collect",   item: "Fish", amount: 6 }   bring items (they are handed over when it finishes)
+    //     { type: "survive",   turns: 25 }                  stay alive this many turns after accepting
+    //     { type: "baseLevel", level: 4 }                   upgrade the base to this level
+    //     { type: "engine" }                                build the engine
+    //     { type: "mount",     amount: 1 }                  have this many ship weapons mounted
+    //     { type: "kills",     amount: 5 }                  defeat this many monsters after accepting
+    //   reward - any of: items { "Name": count }, lootRolls, health, thirst, hunger
+    //   minBaseLevel (optional) - only offered once the base is at least this level
+    questList: [
+      { name: "Fresh Water Run",
+        prompt: "A parched castaway drifts alongside the player's raft and begs for fresh water.",
+        goal: { type: "collect", item: "Fresh Water", amount: 4 },
+        reward: { items: { "Reinforced Plating": 3 }, lootRolls: 1 } },
+      { name: "A Hot Meal",
+        prompt: "A hungry ship's cook offers a trade for fish.",
+        goal: { type: "collect", item: "Fish", amount: 6 },
+        reward: { items: { "Wiring": 3 }, hunger: 20 } },
+      { name: "Hold the Line",
+        prompt: "A beacon operator asks the player to keep their vessel afloat through a rough stretch of sea.",
+        goal: { type: "survive", turns: 25 },
+        reward: { lootRolls: 2, health: 20 } },
+      { name: "A Bigger Hull",
+        prompt: "A shipwright says the player's vessel could be so much more, if only it were upgraded.",
+        goal: { type: "baseLevel", level: 4 },
+        reward: { items: { "Engine Part": 3 }, lootRolls: 1 } },
+      { name: "Ironclad",
+        prompt: "An old sea captain challenges the player to build something truly formidable.",
+        goal: { type: "baseLevel", level: 7 },
+        minBaseLevel: 4,
+        reward: { items: { "Power Cell": 2 }, lootRolls: 2 } },
+      { name: "Heart of the Ship",
+        prompt: "A tinkerer says no vessel is complete without a working engine.",
+        goal: { type: "engine" },
+        reward: { items: { "Power Cell": 2, "Wiring": 2 } } },
+      { name: "Armed and Ready",
+        prompt: "A grizzled sailor warns that the player's vessel needs a mounted weapon.",
+        goal: { type: "mount", amount: 1 },
+        reward: { items: { "Scrap Metal": 8 }, lootRolls: 2 } }
+    ]
+  },
+
+  // ===== APOCALYPSE: a 4x4 SUV that grows into the Reaper Tank =====
+  apocalypse: {
+    worldName: "Monster Apocalypse",
+    baseName: "Vehicle",
+    // Six named tiers; after that the script continues with "Reaper Tank Mk.2", "Mk.3", ...
+    baseTiers: ["4x4 SUV", "Van", "Truck", "Monster Slayer", "Tank", "Reaper Tank"],
+
+    // Monsters are the point of this world, so kill drops work alongside timed chests
+    lootMode: "both",
+
+    items: {
+      "Scrap Metal": 3,
+      "Fresh Water": 3,
+      "Canned Food": 3
+    },
+    lootPools: {
+      "Resource": ["Med Kit", "Bandages", "Power Cell"],
+      "Weapon": ["Spear", "pistol", "SMG", "Automated Defense Turret", "Desert Eagle", "railgun", "cannon", "combat knife"],
+      "Food": ["Canned Food", "Dried Meat", "Fresh Water", "rations", "MRE's"],
+      "Upgrade Material": ["Scrap Metal", "Engine Part", "Wiring", "Reinforced Plating"]
+    },
+    consumables: {
+      "Fresh Water": { thirst: 25 },
+      "Canned Food": { hunger: 20 },
+      "Dried Meat": { hunger: 20 },
+      "rations": { hunger: 30 },
+      "MRE's": { hunger: 50 },
+      "Med Kit": { health: 40 },
+      "Bandages": { health: 15 },
+      "Power Cell": { power: 9999 }   // fully recharges the engine (capped at its maximum)
+    },
+
+    // Kill words for monster hunting (this list replaces the shared one)
+    killWords: ["killed", "slain", "slew", "defeated", "destroyed", "dies", "exterminated"],
+
+    events: [
+      { name: "Storm", weight: 25,
+        prompt: "A violent storm batters the player's vehicle, testing its defenses. It is intense but short lived.",
+        healthChange: -5 },
+      { name: "Survivor", weight: 20,
+        prompt: "A lone survivor stumbles up to the vehicle and offers the player a gift in exchange for joining the player's crew.",
+        lootRolls: 1 },
+      { name: "Monster Encounter", weight: 30,
+        prompt: "A dangerous monster attacks the player's vehicle. The player fights it off, but not without injury.",
+        healthChange: -10, lootRolls: 1 },
+      { name: "Abandoned Wreckage", weight: 15,
+        prompt: "The player finds abandoned wreckage by the road, full of things worth salvaging.",
+        lootRolls: 2 },
+      { name: "Heavy Rain", weight: 10,
+        prompt: "A heavy rain falls and the player collects fresh water.",
+        thirstChange: 20 }
+    ],
+
+    // Quests for this world (see the explanation of the format in the ocean world above)
+    questList: [
+      { name: "Supply Run",
+        prompt: "A starving survivor huddled behind a barricade begs the player for canned food.",
+        goal: { type: "collect", item: "Canned Food", amount: 6 },
+        reward: { items: { "Reinforced Plating": 3 }, lootRolls: 1 } },
+      { name: "Clean Water",
+        prompt: "A mechanic at a roadside camp will trade parts for clean drinking water.",
+        goal: { type: "collect", item: "Fresh Water", amount: 4 },
+        reward: { items: { "Wiring": 3, "Engine Part": 1 } } },
+      { name: "Monster Cull",
+        prompt: "A militia scout says monsters are swarming the nearby road and asks the player to thin them out.",
+        goal: { type: "kills", amount: 5 },
+        reward: { items: { "Engine Part": 3 }, lootRolls: 1 } },
+      { name: "Slayer's Contract",
+        prompt: "A hardened bounty broker offers a contract on a pack of monsters terrorizing the region.",
+        goal: { type: "kills", amount: 10 },
+        minBaseLevel: 3,
+        reward: { items: { "Power Cell": 2 }, lootRolls: 2 } },
+      { name: "Hold the Road",
+        prompt: "A convoy leader asks the player to keep their vehicle alive and moving through dangerous territory.",
+        goal: { type: "survive", turns: 25 },
+        reward: { lootRolls: 2, health: 20 } },
+      { name: "Armor Up",
+        prompt: "A salvager says the player's vehicle won't last long without serious upgrades.",
+        goal: { type: "baseLevel", level: 4 },
+        reward: { items: { "Engine Part": 3 }, lootRolls: 1 } },
+      { name: "Reaper Rising",
+        prompt: "A legendary driver challenges the player to build a machine worthy of the Reaper name.",
+        goal: { type: "baseLevel", level: 6 },
+        minBaseLevel: 4,
+        reward: { items: { "Power Cell": 3 }, lootRolls: 3 } },
+      { name: "Under the Hood",
+        prompt: "A mechanic insists the player's vehicle needs a proper engine before the next horde arrives.",
+        goal: { type: "engine" },
+        reward: { items: { "Power Cell": 2, "Wiring": 2 } } },
+      { name: "Gun Emplacement",
+        prompt: "A militia engineer says the player's vehicle needs a mounted weapon.",
+        goal: { type: "mount", amount: 1 },
+        reward: { items: { "Scrap Metal": 8 }, lootRolls: 2 } }
+    ]
+  }
+};
+
+
+// ---------------------------------------------------------------------
+// 1c. BUILD THE ACTIVE SETTINGS
+// ---------------------------------------------------------------------
+
+// Lays "extra" over "base" and returns the result. Objects are merged setting by setting;
+// everything else (numbers, text, lists) is simply replaced by the world's version.
+function everDeepMerge(base, extra) {
+  const result = {};
+  for (const key in base) {
+    result[key] = base[key];
+  }
+  for (const key in extra) {
+    const extraIsObject = extra[key] && typeof extra[key] === "object" && !Array.isArray(extra[key]);
+    const baseIsObject = base[key] && typeof base[key] === "object" && !Array.isArray(base[key]);
+    if (extraIsObject && baseIsObject) {
+      result[key] = everDeepMerge(base[key], extra[key]);   // merge inside nested blocks
+    } else {
+      result[key] = extra[key];
+    }
+  }
+  return result;
+}
+
+// A typo in the world name should fail loudly, not quietly run the wrong world
+if (!EVER_PRESETS[EVER_ACTIVE_PRESET]) {
+  throw new Error("E.V.E.R.: unknown world '" + EVER_ACTIVE_PRESET +
+    "'. Use one of: " + Object.keys(EVER_PRESETS).join(", "));
+}
+
+// The settings the rest of the script reads
+const EVER_CONFIG = everDeepMerge(EVER_SHARED, EVER_PRESETS[EVER_ACTIVE_PRESET]);
+
+
+// =====================================================================
+// 2. HELPERS
+// =====================================================================
+
+// Picks a whole number between min and max (both included)
+function everRandom(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+// Keeps a number between 0 and the item cap
+function everClamp(value) {
+  return Math.max(0, Math.min(EVER_CONFIG.maxItemCount, value));
+}
+
+// Picks a position from a list of weights.
+// Example: [50, 25, 15, 8, 2] returns 0 about half the time, 4 about 2% of the time.
+function everWeightedIndex(weights) {
+  // Add up all the weights to get the total
+  let total = 0;
+  for (let i = 0; i < weights.length; i++) {
+    total += weights[i];
+  }
+
+  // Roll a random number between 0 and the total
+  let roll = Math.random() * total;
+
+  // Walk through the weights, subtracting each one.
+  // The first time the roll drops below 0, that's the winner.
+  for (let i = 0; i < weights.length; i++) {
+    roll -= weights[i];
+    if (roll < 0) return i;
+  }
+
+  return weights.length - 1; // safety net, shouldn't normally be reached
+}
+
+// The name of the base at a given level. Past the last named tier it continues from
+// the final name: "Reaper Tank Mk.2", "Reaper Tank Mk.3", and so on.
+function everTierName(level) {
+  const tiers = EVER_CONFIG.baseTiers;
+  if (level <= tiers.length) return tiers[level - 1];
+  return tiers[tiers.length - 1] + " Mk." + (level - tiers.length + 1);
+}
+
+// Builds the starting inventory from the items listed in the settings
+function everBuildInventory() {
+  const inv = {};
+  for (const name in EVER_CONFIG.items) {
+    inv[name] = everClamp(EVER_CONFIG.items[name]);
+  }
+  return inv;
+}
+
+// Updates a story card with this title, or creates it if it doesn't exist
+function everUpsertCard(title, entry, type) {
+  for (let i = 0; i < storyCards.length; i++) {
+    if (storyCards[i].keys === title) {
+      storyCards[i].entry = entry;
+      return;
+    }
+  }
+  addStoryCard(title, entry, type);
+}
+
+
+// =====================================================================
+// 3. SETUP
+// =====================================================================
+
+// Creates the live game state, but only the very first time
+function everInit() {
+  if (state.ever) return; // already set up, so don't reset the game
+  state.ever = {
+    turnsUntilChest: everRandom(EVER_CONFIG.chestMin, EVER_CONFIG.chestMax),
+    turnsUntilEvent: everRandom(EVER_CONFIG.eventMin, EVER_CONFIG.eventMax),
+    baseLevel: 1,
+    inventory: everBuildInventory(),
+    health: EVER_CONFIG.startHealth,
+    thirst: EVER_CONFIG.startThirst,
+    hunger: EVER_CONFIG.startHunger,
+    engineLevel: 0,            // 0 = no engine yet
+    power: 0,                  // the engine's current power
+    equipped: [],              // ship weapons currently mounted
+    lastEquipped: null,        // the weapon most recently mounted or removed
+    chestsOpened: 0,
+    lastLoot: null,            // text describing the most recent drop
+    lastEvent: null,           // name of the most recent event
+    lastUsed: null,            // the item most recently used with /use
+    lastTickedAction: null,    // stops Retry from counting a turn twice
+    pendingChest: null,        // kill-drop note waiting for the AI to narrate
+    pendingEvent: null,        // (older system) event note waiting for the AI
+    pendingDeath: null,        // death note waiting for the AI to narrate
+    pendingSalvage: false,     // (older system) true after the player types /salvage
+    salvageNote: null,         // salvage haul rolled in Input, narrated this turn
+    preRollAction: null,       // which turn the same-turn rolls were done for
+    preRollNote: "",           // the note from those rolls (reused by Retry)
+    dead: false                // true once health hits 0
+  };
+}
+
+everInit();
+
+
+// =====================================================================
+// 4. STORY CARDS
+// =====================================================================
+
+// Builds the text for the Engine card from the current game state.
+// Each line only appears if its feature switch is turned on.
+function everEngineText() {
+  const s = state.ever;               // shortcut to the live game state
+  const f = EVER_CONFIG.features;     // shortcut to the on/off switches
+  const lines = [];                   // we collect lines here, then join them
+
+  lines.push("World: " + EVER_CONFIG.worldName);
+
+  if (f.baseUpgrades) {
+    // Past the named tiers, names continue like "Ark Mk.2"
+    const tierName = everTierName(s.baseLevel);
+    lines.push(EVER_CONFIG.baseName + ": " + tierName + " (Level " + s.baseLevel + ")");
+    lines.push("Next upgrade: " + everUpgradeCostText() +
+      " (type " + EVER_CONFIG.upgradeCommand + ")");
+  }
+  if (f.health) lines.push("Health: " + s.health + "/" + EVER_CONFIG.startHealth);
+  if (f.thirst) lines.push("Thirst: " + s.thirst + "/" + EVER_CONFIG.startThirst);
+  if (f.hunger) lines.push("Hunger: " + s.hunger + "/" + EVER_CONFIG.startHunger);
+  if (f.engine) {
+    if (everHasEngine()) {
+      lines.push("Power: " + s.power + "/" + everPowerMax() + " (" + EVER_CONFIG.engine.name + " level " + s.engineLevel + ")");
+      lines.push("Next " + EVER_CONFIG.engine.name.toLowerCase() + " upgrade: " + everCostsToText(everEngineUpgradeCosts()) +
+        " (type " + EVER_CONFIG.engine.command + ")");
+    } else if (s.baseLevel >= EVER_CONFIG.engine.unlockBaseLevel) {
+      lines.push(EVER_CONFIG.engine.name + ": not built. Build it for " + everCostsToText(EVER_CONFIG.engine.buildCost) +
+        " (type " + EVER_CONFIG.engine.command + ")");
+    }
+  }
+  if (f.weaponSlots && everWeaponSlots() > 0) {
+    const mountedNow = everEquippedList();
+    lines.push("Weapons equipped (" + mountedNow.length + "/" + everWeaponSlots() + "): " +
+      (mountedNow.length > 0 ? mountedNow.join(", ") : "none"));
+  }
+  if (f.chests) lines.push("Chests opened: " + s.chestsOpened);
+  if (f.chests) lines.push("Last chest: " + (s.lastLoot || "None yet"));
+
+  // Commands the player can type. Each one only appears if that system is turned on,
+  // and the command names come from the settings, so renaming one there updates the card.
+  const cmds = [];
+  if (f.baseUpgrades) {
+    cmds.push(EVER_CONFIG.upgradeCommand + " - spend materials to upgrade your " +
+      EVER_CONFIG.baseName);
+  }
+  if (f.engine && state.ever.baseLevel >= EVER_CONFIG.engine.unlockBaseLevel) {
+    cmds.push(EVER_CONFIG.engine.command + " - build or upgrade your " + EVER_CONFIG.engine.name.toLowerCase());
+  }
+  if (f.weaponSlots && everWeaponSlots() > 0) {
+    cmds.push(EVER_CONFIG.weaponSlots.equipCommand + " <weapon> - mount a ship weapon (" +
+      EVER_CONFIG.weaponSlots.unequipCommand + " <weapon> removes it)");
+  }
+  if (f.thirst || f.hunger || f.health) {
+    cmds.push(EVER_CONFIG.useCommand + " <item> - use food, drink or medicine (like " +
+      EVER_CONFIG.useCommand + " fish)");
+  }
+  if (f.drops && EVER_CONFIG.lootMode !== "timer") {
+    cmds.push(EVER_CONFIG.salvageCommand + " - go on a salvage run for random items");
+  }
+  if (cmds.length > 0) {
+    lines.push("");                   // blank line to separate the commands from the stats
+    lines.push("Commands:");
+    for (let i = 0; i < cmds.length; i++) {
+      lines.push(cmds[i]);
+    }
+  }
+
+  return lines.join("\n");            // "\n" puts each item on its own line
+}
+
+// Builds the text for the Inventory card: one line per item
+function everInventoryText() {
+  const inv = state.ever.inventory;
+  const lines = [];
+  for (const name in inv) {
+    lines.push(name + ": " + inv[name]);
+  }
+  return lines.join("\n");
+}
+
+// Writes both cards. The inventory card is skipped if that feature is off.
+function everRenderCards() {
+  everUpsertCard(EVER_CONFIG.cards.engine, everEngineText(), "Other");
+  if (EVER_CONFIG.features.inventory) {
+    everUpsertCard(EVER_CONFIG.cards.inventory, everInventoryText(), "Other");
+  }
+  if (EVER_CONFIG.features.quests) {
+    everUpsertCard(EVER_CONFIG.cards.quests, everQuestCardText(), "Other");
+  }
+}
+
+
+// =====================================================================
+// 5. LOOT
+// =====================================================================
+
+// Rolls one random drop and adds it to the inventory.
+// "source" labels where it came from: leave it out for a real chest,
+// or pass "drop", "salvage" or "reward". Returns a text description.
+function everRollLoot(source) {
+  const cfg = EVER_CONFIG;
+  const s = state.ever;
+
+  // Use the weights if they're set up correctly (one per rank),
+  // otherwise fall back to every rank being equally likely
+  let rankIndex;
+  if (cfg.rankWeights && cfg.rankWeights.length === cfg.ranks.length) {
+    rankIndex = everWeightedIndex(cfg.rankWeights);
+  } else {
+    rankIndex = everRandom(0, cfg.ranks.length - 1);
+  }
+  const rank = cfg.ranks[rankIndex];           // Common = 0, Uncommon = 1, ...
+
+  // Pick a random item class, then a random item from that class's pool
+  const itemClass = cfg.itemClasses[everRandom(0, cfg.itemClasses.length - 1)];
+  const pool = cfg.lootPools[itemClass];
+  if (!pool || pool.length === 0) return;      // empty pool, so nothing drops
+
+  // Leave out items that aren't unlocked yet (see gatedItems in the settings)
+  const available = [];
+  for (let i = 0; i < pool.length; i++) {
+    if (everItemUnlocked(pool[i])) available.push(pool[i]);
+  }
+  if (available.length === 0) return;          // nothing in this pool is unlocked yet
+  const item = available[everRandom(0, available.length - 1)];
+
+  // Higher ranks give more items: the base amount times (rank position + 1)
+  const amount = everRandom(cfg.chestAmountMin, cfg.chestAmountMax) * (rankIndex + 1);
+
+  // Add to the inventory (starting from 0 if it's a brand-new item), capped at 999
+  const current = s.inventory[item] || 0;
+  s.inventory[item] = everClamp(current + amount);
+
+  if (!source) s.chestsOpened += 1;            // only real chests count toward the total
+  s.lastLoot = rank + " " + (source || "chest") + ": " + amount + " x " + item;
+  return s.lastLoot;                           // handed back so callers can list it
+}
+
+// Counts down one turn. When it hits 0, opens a chest and restarts the timer.
+// Returns true if a chest appeared this turn.
+function everChestTick() {
+  if (!EVER_CONFIG.features.chests) return false;       // feature switched off
+  if (EVER_CONFIG.lootMode === "kills") return false;   // no timed chests in kills-only worlds
+
+  const s = state.ever;
+  s.turnsUntilChest -= 1;
+
+  if (s.turnsUntilChest <= 0) {
+    everRollLoot();
+    s.turnsUntilChest = everRandom(EVER_CONFIG.chestMin, EVER_CONFIG.chestMax);
+    return true;
+  }
+  return false;
+}
+
+
+// =====================================================================
+// 6. BASE UPGRADES
+// =====================================================================
+
+// Works out the full cost of the next upgrade as a list,
+// like { "Scrap Metal": 5, "Reinforced Plating": 3 }.
+function everUpgradeCosts() {
+  const cfg = EVER_CONFIG;
+  // The "full" cost for this level: the base cost plus the step for each level already gained
+  const full = cfg.upgradeBaseCost + cfg.upgradeCostStep * (state.ever.baseLevel - 1);
+
+  const costs = {};
+  for (const material in cfg.upgradeRecipe) {
+    // Each material pays its share of the full cost, rounded up,
+    // at least 1, and never above the 999 cap
+    const amount = Math.ceil(full * cfg.upgradeRecipe[material]);
+    costs[material] = Math.max(1, Math.min(cfg.maxItemCount, amount));
+  }
+  return costs;
+}
+
+// Turns the cost list into text, like "5 Scrap Metal, 3 Reinforced Plating"
+function everUpgradeCostText() {
+  return everCostsToText(everUpgradeCosts());
+}
+
+// Tries to buy an upgrade. Returns a message telling the player what happened.
+function everTryUpgrade() {
+  const s = state.ever;
+  if (!EVER_CONFIG.features.baseUpgrades) return "Base upgrades are turned off.";
+
+  const costs = everUpgradeCosts();
+
+  // Check EVERY material first, and list everything that's short
+  const missing = everMissingFor(costs);
+  if (missing.length > 0) {
+    return "Not enough materials: " + missing.join(", ") + ".";   // nothing is spent
+  }
+
+  // Everything is available, so pay for all of it, then level up
+  const spent = everCostsToText(costs);   // worked out BEFORE the level changes
+  everSpend(costs);
+  s.baseLevel += 1;
+  return "Upgraded to level " + s.baseLevel + "! Spent " + spent + ".";
+}
+
+
+// =====================================================================
+// 7. SURVIVAL
+// =====================================================================
+
+// Runs once per turn: thirst and hunger drain, either one hurts health at 0,
+// and otherwise health slowly regenerates.
+// Each part checks its feature switch first.
+function everSurvivalTick() {
+  const cfg = EVER_CONFIG;
+  const f = cfg.features;
+  const s = state.ever;
+
+  // Adventures started before hunger existed don't have a value yet, so create it
+  if (s.hunger === undefined) s.hunger = cfg.startHunger;
+  if (s.engineLevel === undefined) s.engineLevel = 0;   // same for the engine
+  if (s.power === undefined) s.power = 0;
+
+  // Thirst drains every turn
+  if (f.thirst) {
+    s.thirst = Math.max(0, s.thirst - cfg.thirstLossPerTurn);
+    if (s.thirst === 0 && f.health) {
+      s.health = Math.max(0, s.health - cfg.healthLossWhenDry);
+    }
+  }
+
+  // Hunger drains more slowly: only on turns divisible by hungerLossEvery
+  // (% is "remainder", so 6 % 2 is 0 but 7 % 2 is 1)
+  if (f.hunger) {
+    if (info.actionCount % cfg.hungerLossEvery === 0) {
+      s.hunger = Math.max(0, s.hunger - cfg.hungerLossPerTurn);
+    }
+    if (s.hunger === 0 && f.health) {
+      s.health = Math.max(0, s.health - cfg.healthLossWhenStarving);
+    }
+  }
+
+  // Engine power drains every turn once an engine exists
+  if (everHasEngine()) {
+    s.power = Math.max(0, s.power - cfg.engine.drainPerTurn);
+  }
+
+  // Health regeneration: only while not dehydrated and not starving
+  if (f.health && f.regen) {
+    const hydrated = !f.thirst || s.thirst > cfg.regenMinThirst;
+    const fed = !f.hunger || s.hunger > 0;
+    if (hydrated && fed && s.health > 0 && s.health < cfg.startHealth) {
+      s.health = Math.min(cfg.startHealth, s.health + cfg.healthRegenPerTurn);
+    }
+  }
+}
+
+// The older /drink command (now disabled in the Input tab, kept in case it's needed again)
+function everTryDrink() {
+  const cfg = EVER_CONFIG;
+  const s = state.ever;
+  if (!cfg.features.thirst) return "Thirst is turned off.";
+
+  const have = s.inventory[cfg.drinkItem] || 0;
+  if (have < 1) return "You have no " + cfg.drinkItem + ".";
+  if (s.thirst >= cfg.startThirst) return "You're not thirsty.";
+
+  s.inventory[cfg.drinkItem] = have - 1;                               // use up one
+  s.thirst = Math.min(cfg.startThirst, s.thirst + cfg.thirstRestore);  // restore, capped at full
+  return "You drank 1 " + cfg.drinkItem + ". Thirst is now " + s.thirst + ".";
+}
+
+// Tries to use one consumable. "query" is what the player typed after /use,
+// already lowercase. Returns a message telling the player what happened.
+function everTryUse(query) {
+  const cfg = EVER_CONFIG;
+  const f = cfg.features;
+  const s = state.ever;
+  if (s.hunger === undefined) s.hunger = cfg.startHunger;
+  s.lastUsed = null;   // set below only if something is actually used
+
+  // Which usable items does the player actually have right now?
+  const usable = [];
+  for (const name in cfg.consumables) {
+    if ((s.inventory[name] || 0) > 0) usable.push(name);
+  }
+
+  // /use with nothing after it: list what they can use
+  if (query === "") {
+    return usable.length > 0 ? "Usable items: " + usable.join(", ") + "."
+                             : "You have nothing to use.";
+  }
+
+  // Find the item they meant (partial names work: "mre" finds "MRE's")
+  let match = null;
+  for (let i = 0; i < usable.length; i++) {
+    if (usable[i].toLowerCase().indexOf(query) !== -1) { match = usable[i]; break; }
+  }
+  if (!match) return "You don't have anything usable called \"" + query + "\".";
+
+  // Apply the item's effects to each stat, but only to stats that are switched on
+  // and below their maximum
+  const effect = cfg.consumables[match];
+  const stats = [
+    { key: "hunger", on: f.hunger, max: cfg.startHunger },
+    { key: "thirst", on: f.thirst, max: cfg.startThirst },
+    { key: "health", on: f.health, max: cfg.startHealth },
+    { key: "power", on: everHasEngine(), max: everPowerMax() }   // only works once there's an engine
+  ];
+  const results = [];
+  for (let i = 0; i < stats.length; i++) {
+    const st = stats[i];
+    const amount = effect[st.key];
+    if (amount && st.on && s[st.key] < st.max) {
+      const before = s[st.key];
+      s[st.key] = Math.min(st.max, before + amount);
+      results.push(st.key + " +" + (s[st.key] - before));
+    }
+  }
+
+  // If it wouldn't help, don't waste it
+  if (results.length === 0) return "You don't need " + match + " right now.";
+
+  s.inventory[match] -= 1;
+  s.lastUsed = match;
+  return "Used 1 " + match + " (" + results.join(", ") + ").";
+}
+
+
+// =====================================================================
+// 7b. ENGINE AND POWER
+// =====================================================================
+
+// Turns a cost list into text, like "5 Engine Part, 3 Wiring"
+function everCostsToText(costs) {
+  const parts = [];
+  for (const material in costs) {
+    parts.push(costs[material] + " " + material);
+  }
+  return parts.join(", ");
+}
+
+// Checks a cost list against the inventory. Returns a list of what's short,
+// like ["Wiring (need 3, have 0)"]. An empty list means the player can afford it.
+function everMissingFor(costs) {
+  const missing = [];
+  for (const material in costs) {
+    const have = state.ever.inventory[material] || 0;   // 0 if they've never found any
+    if (have < costs[material]) {
+      missing.push(material + " (need " + costs[material] + ", have " + have + ")");
+    }
+  }
+  return missing;
+}
+
+// Takes a whole cost list out of the inventory (check everMissingFor first!)
+function everSpend(costs) {
+  for (const material in costs) {
+    state.ever.inventory[material] -= costs[material];
+  }
+}
+
+// Has the engine been built (and is the engine feature on)?
+function everHasEngine() {
+  return !!EVER_CONFIG.features.engine && (state.ever.engineLevel || 0) > 0;
+}
+
+// The most power the engine can hold at its current level (0 if there's no engine)
+function everPowerMax() {
+  const e = EVER_CONFIG.engine;
+  const level = state.ever.engineLevel || 0;
+  if (level < 1) return 0;
+  return e.startCapacity + e.capacityPerLevel * (level - 1);
+}
+
+// The cost of the next engine upgrade as a list, like { "Engine Part": 5, "Wiring": 3 }
+function everEngineUpgradeCosts() {
+  const e = EVER_CONFIG.engine;
+  const level = state.ever.engineLevel || 1;
+  const full = e.upgradeBaseCost + e.upgradeCostStep * (level - 1);
+
+  const costs = {};
+  for (const material in e.upgradeRecipe) {
+    const amount = Math.ceil(full * e.upgradeRecipe[material]);
+    costs[material] = Math.max(1, Math.min(EVER_CONFIG.maxItemCount, amount));
+  }
+  return costs;
+}
+
+// Builds the engine if there isn't one yet, otherwise upgrades it.
+// Returns a message telling the player what happened.
+function everTryEngine() {
+  const cfg = EVER_CONFIG;
+  const e = cfg.engine;
+  const s = state.ever;
+  const name = e.name;   // what this world calls it
+  if (!cfg.features.engine) return name + " is turned off.";
+  if (s.engineLevel === undefined) s.engineLevel = 0;
+
+  // ----- No engine yet: try to build one -----
+  if (s.engineLevel < 1) {
+    if (s.baseLevel < e.unlockBaseLevel) {
+      return "You can't build the " + name.toLowerCase() + " yet. Your " + cfg.baseName +
+        " must reach level " + e.unlockBaseLevel + " first.";
+    }
+    const missing = everMissingFor(e.buildCost);
+    if (missing.length > 0) {
+      return "Not enough materials to build the " + name.toLowerCase() + ": " + missing.join(", ") + ".";
+    }
+    const spent = everCostsToText(e.buildCost);
+    everSpend(e.buildCost);
+    s.engineLevel = 1;
+    s.power = everPowerMax();             // a new engine starts with full power
+    return name + " built! Spent " + spent + ". Power: " + s.power + "/" + everPowerMax() + ".";
+  }
+
+  // ----- Engine exists: try to upgrade it -----
+  const costs = everEngineUpgradeCosts();
+  const missing = everMissingFor(costs);
+  if (missing.length > 0) {
+    return "Not enough materials: " + missing.join(", ") + ".";
+  }
+  const spent = everCostsToText(costs);
+  everSpend(costs);
+  s.engineLevel += 1;
+  if (e.refillsOnUpgrade) s.power = everPowerMax();
+  return name + " upgraded to level " + s.engineLevel + "! Spent " + spent +
+    ". Max power is now " + everPowerMax() + ".";
+}
+
+// Is this item allowed to drop yet? Items listed in gatedItems wait for their requirement.
+function everItemUnlocked(name) {
+  const requirement = EVER_CONFIG.gatedItems[name];
+  if (!requirement) return true;                       // not gated: always available
+  if (requirement === "engine") return everHasEngine();
+  return true;                                         // unknown requirement: don't block
+}
+
+// TEST HELPER: only works when debugCommands is true in the settings.
+//   /give <item> <amount>   for example: /give engine part 5
+//   /setlevel <number>      for example: /setlevel 3
+// Returns a message, or null if the text isn't a debug command (or debugging is off).
+function everDebug(typed) {
+  const cfg = EVER_CONFIG;
+  if (!cfg.debugCommands) return null;
+  const s = state.ever;
+
+  if (typed.indexOf("/offerquest") === 0) {
+    everQuestInit();
+    s.turnsUntilQuest = 1;   // the next turn offers a quest (if none is waiting or active)
+    return "A quest will be offered next turn (if none is waiting or active).";
+  }
+
+  if (typed.indexOf("/setlevel") === 0) {
+    const n = parseInt(typed.slice(9).trim(), 10);
+    if (isNaN(n) || n < 1) return "Usage: /setlevel 3";
+    s.baseLevel = n;
+    return "Base level set to " + n + ".";
+  }
+
+  if (typed.indexOf("/give") === 0) {
+    const words = typed.slice(5).trim().split(" ");
+    const amount = parseInt(words[words.length - 1], 10);          // the last word is the amount
+    const query = words.slice(0, words.length - 1).join(" ");      // everything before it is the item
+    if (isNaN(amount) || query === "") return "Usage: /give engine part 5";
+
+    // Collect every item name the game knows about: the inventory plus every loot pool
+    const names = Object.keys(s.inventory);
+    for (const cls in cfg.lootPools) {
+      for (let i = 0; i < cfg.lootPools[cls].length; i++) {
+        if (names.indexOf(cfg.lootPools[cls][i]) === -1) names.push(cfg.lootPools[cls][i]);
+      }
+    }
+    for (let i = 0; i < names.length; i++) {
+      if (names[i].toLowerCase().indexOf(query) !== -1) {
+        s.inventory[names[i]] = everClamp((s.inventory[names[i]] || 0) + amount);
+        return "Gave " + amount + " " + names[i] + ".";
+      }
+    }
+    return "No item matches \"" + query + "\".";
+  }
+  return null;
+}
+
+
+// =====================================================================
+// 7c. SHIP WEAPON SLOTS
+// =====================================================================
+
+// Returns the list of mounted weapons. Adventures started before slots existed
+// don't have one yet, so it is created here if it's missing.
+function everEquippedList() {
+  const s = state.ever;
+  if (!s.equipped) s.equipped = [];
+  return s.equipped;
+}
+
+// How many ship weapons the base can hold at its current level (0 = none unlocked yet).
+// Level 3 gives 1 slot, level 4 gives 3, level 5 gives 5, and so on.
+function everWeaponSlots() {
+  const w = EVER_CONFIG.weaponSlots;
+  if (!EVER_CONFIG.features.weaponSlots) return 0;
+  const level = state.ever.baseLevel;
+  if (level < w.unlockBaseLevel) return 0;
+  return w.startSlots + w.slotsPerLevel * (level - w.unlockBaseLevel);
+}
+
+// Finds the first name in a list that contains the query (partial names work, case ignored).
+// Returns the index, or -1 if nothing matches.
+function everFindByQuery(names, query) {
+  for (let i = 0; i < names.length; i++) {
+    if (names[i].toLowerCase().indexOf(query) !== -1) return i;
+  }
+  return -1;
+}
+
+// Mounts a weapon from the inventory into a free slot.
+// "query" is what the player typed after /equip, already lowercase.
+function everTryEquip(query) {
+  const cfg = EVER_CONFIG;
+  const s = state.ever;
+  s.lastEquipped = null;   // set below only if a weapon is actually mounted
+  if (!cfg.features.weaponSlots) return "Weapon slots are turned off.";
+
+  const slots = everWeaponSlots();
+  if (slots < 1) {
+    return "Your " + cfg.baseName + " can't mount weapons yet. It must reach level " +
+      cfg.weaponSlots.unlockBaseLevel + " first.";
+  }
+  const equipped = everEquippedList();
+
+  // Which mountable weapons does the player actually have?
+  const available = [];
+  for (let i = 0; i < cfg.mountedWeapons.length; i++) {
+    if ((s.inventory[cfg.mountedWeapons[i]] || 0) > 0) available.push(cfg.mountedWeapons[i]);
+  }
+
+  // /equip with nothing after it: show what's mounted and what could be
+  if (query === "") {
+    return "Mounted (" + equipped.length + "/" + slots + "): " +
+      (equipped.length > 0 ? equipped.join(", ") : "none") + ". Available to mount: " +
+      (available.length > 0 ? available.join(", ") : "none") + ".";
+  }
+
+  const index = everFindByQuery(available, query);
+  if (index === -1) return "You don't have a mountable weapon called \"" + query + "\".";
+  if (equipped.length >= slots) {
+    return "No free weapon slots (" + equipped.length + "/" + slots + "). Use " +
+      cfg.weaponSlots.unequipCommand + " first.";
+  }
+
+  const name = available[index];
+  s.inventory[name] -= 1;      // the weapon leaves the inventory...
+  equipped.push(name);         // ...and goes into a slot
+  s.lastEquipped = name;
+  return "Mounted " + name + " (" + equipped.length + "/" + slots + " slots used).";
+}
+
+// Takes a mounted weapon out of its slot and puts it back in the inventory.
+function everTryUnequip(query) {
+  const cfg = EVER_CONFIG;
+  const s = state.ever;
+  s.lastEquipped = null;
+  if (!cfg.features.weaponSlots) return "Weapon slots are turned off.";
+
+  const equipped = everEquippedList();
+  if (query === "") {
+    return "Mounted (" + equipped.length + "/" + everWeaponSlots() + "): " +
+      (equipped.length > 0 ? equipped.join(", ") : "none") + ".";
+  }
+
+  const index = everFindByQuery(equipped, query);
+  if (index === -1) return "You don't have a mounted weapon called \"" + query + "\".";
+
+  const name = equipped.splice(index, 1)[0];   // remove it from the slot list
+  s.inventory[name] = everClamp((s.inventory[name] || 0) + 1);
+  s.lastEquipped = name;
+  return "Removed " + name + " from its mount.";
+}
+
+
+// =====================================================================
+// 7d. QUESTS
+// =====================================================================
+
+// Makes sure the quest values exist (older adventures won't have them yet)
+function everQuestInit() {
+  const s = state.ever;
+  const Q = EVER_CONFIG.quests;
+  if (s.questState === undefined) {
+    s.questState = "idle";      // "idle" = nothing, "offered" = waiting for an answer, "active" = accepted
+    s.questIndex = null;        // which quest in questList
+    s.questStartAction = 0;     // the turn the quest was offered, then accepted
+    s.questKillsAtStart = 0;    // the kill total when the quest was accepted
+    s.questsCompleted = 0;
+    s.lastQuestIndex = null;    // so the same quest isn't offered twice in a row
+    s.questNote = null;         // a note for the AI about an accept/deny that just happened
+  }
+  if (s.killCount === undefined) s.killCount = 0;
+  if (s.turnsUntilQuest === undefined) {
+    s.turnsUntilQuest = everRandom(Q.offerMin, Q.offerMax);
+  }
+}
+
+// The quest the player has been offered or accepted (null if none)
+function everCurrentQuest() {
+  const s = state.ever;
+  if (s.questIndex === null || s.questIndex === undefined) return null;
+  return EVER_CONFIG.questList[s.questIndex] || null;
+}
+
+// Describes a goal in words, like "Bring 6 Fish"
+function everGoalText(goal) {
+  if (goal.type === "collect") return "Bring " + goal.amount + " " + goal.item;
+  if (goal.type === "survive") return "Survive " + goal.turns + " turns";
+  if (goal.type === "baseLevel") return "Upgrade your " + EVER_CONFIG.baseName + " to level " + goal.level;
+  if (goal.type === "engine") return "Build the " + EVER_CONFIG.engine.name.toLowerCase();
+  if (goal.type === "mount") return "Mount " + goal.amount + " ship weapon" + (goal.amount > 1 ? "s" : "");
+  if (goal.type === "kills") return "Defeat " + goal.amount + " monsters";
+  return "Complete the task";
+}
+
+// Describes a reward in words, like "2 x Power Cell, 2 random loot rolls, health +20"
+function everRewardText(reward) {
+  const parts = [];
+  if (reward.items) {
+    for (const name in reward.items) parts.push(reward.items[name] + " x " + name);
+  }
+  if (reward.lootRolls) parts.push(reward.lootRolls + " random loot roll" + (reward.lootRolls > 1 ? "s" : ""));
+  if (reward.health) parts.push("health +" + reward.health);
+  if (reward.thirst) parts.push("thirst +" + reward.thirst);
+  if (reward.hunger) parts.push("hunger +" + reward.hunger);
+  return parts.length > 0 ? parts.join(", ") : "gratitude";
+}
+
+// How far along the accepted quest is: { current, target }
+function everQuestProgress(def) {
+  const s = state.ever;
+  const g = def.goal;
+  if (g.type === "collect") return { current: s.inventory[g.item] || 0, target: g.amount };
+  if (g.type === "survive") {
+    return { current: Math.min(g.turns, info.actionCount - s.questStartAction), target: g.turns };
+  }
+  if (g.type === "baseLevel") return { current: s.baseLevel, target: g.level };
+  if (g.type === "engine") return { current: everHasEngine() ? 1 : 0, target: 1 };
+  if (g.type === "mount") return { current: everEquippedList().length, target: g.amount };
+  if (g.type === "kills") {
+    return { current: Math.min(g.amount, s.killCount - s.questKillsAtStart), target: g.amount };
+  }
+  return { current: 0, target: 1 };
+}
+
+// Can this quest be offered right now? (No point asking for something already done or impossible.)
+function everQuestEligible(def) {
+  const s = state.ever;
+  const g = def.goal;
+  if (def.minBaseLevel && s.baseLevel < def.minBaseLevel) return false;
+  if (g.type === "baseLevel" && s.baseLevel >= g.level) return false;
+  if (g.type === "engine" && (everHasEngine() || s.baseLevel < EVER_CONFIG.engine.unlockBaseLevel)) return false;
+  if (g.type === "mount" && (everWeaponSlots() < g.amount || everEquippedList().length >= g.amount)) return false;
+  return true;
+}
+
+// Picks a random quest that can be offered now (not the same one as last time). Null if none.
+function everPickQuest() {
+  const list = EVER_CONFIG.questList;
+  const options = [];
+  for (let i = 0; i < list.length; i++) {
+    if (i !== state.ever.lastQuestIndex && everQuestEligible(list[i])) options.push(i);
+  }
+  if (options.length === 0) return null;
+  return options[everRandom(0, options.length - 1)];
+}
+
+// Gives the player a quest's reward and returns a description of what they got.
+function everApplyReward(reward) {
+  const cfg = EVER_CONFIG;
+  const f = cfg.features;
+  const s = state.ever;
+  const parts = [];
+
+  // Fixed items
+  if (reward.items) {
+    for (const name in reward.items) {
+      s.inventory[name] = everClamp((s.inventory[name] || 0) + reward.items[name]);
+      parts.push(reward.items[name] + " x " + name);
+    }
+  }
+
+  // Random loot rolls (the same loot system as chests)
+  if (reward.lootRolls) {
+    for (let i = 0; i < reward.lootRolls; i++) {
+      const drop = everRollLoot("reward");
+      if (drop) parts.push(drop);
+    }
+  }
+
+  // Stat refills, only for stats that are switched on, never above the maximum
+  const stats = [
+    { key: "health", on: f.health, max: cfg.startHealth },
+    { key: "thirst", on: f.thirst, max: cfg.startThirst },
+    { key: "hunger", on: f.hunger, max: cfg.startHunger }
+  ];
+  for (let i = 0; i < stats.length; i++) {
+    const st = stats[i];
+    if (reward[st.key] && st.on) {
+      const before = s[st.key];
+      s[st.key] = Math.min(st.max, before + reward[st.key]);
+      parts.push(st.key + " +" + (s[st.key] - before));
+    }
+  }
+  return parts.length > 0 ? parts.join(", ") : "the player's gratitude";
+}
+
+// Starts a countdown to the next offer
+function everRestartQuestTimer() {
+  const Q = EVER_CONFIG.quests;
+  state.ever.turnsUntilQuest = everRandom(Q.offerMin, Q.offerMax);
+}
+
+// Accepts the quest that's waiting for an answer. Returns a message for the player.
+function everQuestAccept() {
+  if (!EVER_CONFIG.features.quests) return "Quests are turned off.";
+  everQuestInit();
+  const s = state.ever;
+  if (s.questState !== "offered") return "There is no quest waiting for an answer.";
+  const def = everCurrentQuest();
+  s.questState = "active";
+  s.questStartAction = info.actionCount;     // survive quests count from here
+  s.questKillsAtStart = s.killCount;         // kill quests count from here
+  s.questNote = "The player has accepted the quest \"" + def.name + "\" (" + everGoalText(def.goal) +
+    "). Acknowledge this briefly in the story.";
+  return "Quest accepted: " + def.name + ". " + everGoalText(def.goal) + ".";
+}
+
+// Turns down the quest that's waiting for an answer.
+function everQuestDeny() {
+  if (!EVER_CONFIG.features.quests) return "Quests are turned off.";
+  everQuestInit();
+  const s = state.ever;
+  if (s.questState !== "offered") return "There is no quest waiting for an answer.";
+  const def = everCurrentQuest();
+  s.questState = "idle";
+  s.questIndex = null;
+  everRestartQuestTimer();
+  s.questNote = "The player has turned down the quest \"" + def.name + "\". Mention briefly that they declined.";
+  return "Quest declined: " + def.name + ".";
+}
+
+// Gives up on the accepted quest (so a quest you can't finish never blocks new offers).
+function everQuestAbandon() {
+  if (!EVER_CONFIG.features.quests) return "Quests are turned off.";
+  everQuestInit();
+  const s = state.ever;
+  if (s.questState !== "active") return "You don't have an active quest.";
+  const def = everCurrentQuest();
+  s.questState = "idle";
+  s.questIndex = null;
+  everRestartQuestTimer();
+  s.questNote = "The player has given up on the quest \"" + def.name + "\". Mention briefly that they abandoned it.";
+  return "Quest abandoned: " + def.name + ".";
+}
+
+// Reads the player's answer from the Quests card. If they typed accept or deny
+// after "Decision:" while an offer is waiting, act on it.
+function everReadQuestCard() {
+  if (!EVER_CONFIG.features.quests) return;
+  everQuestInit();
+  const s = state.ever;
+  if (s.questState !== "offered") return;
+
+  for (let i = 0; i < storyCards.length; i++) {
+    if (storyCards[i].keys !== EVER_CONFIG.cards.quests) continue;
+
+    // Find the line that starts with "Decision:" and take whatever follows it
+    const match = /^\s*decision:\s*(.*)$/im.exec(storyCards[i].entry || "");
+    if (!match) return;
+    // Underscores are the empty placeholder, so ignore them
+    const answer = match[1].replace(/[_\s]+/g, " ").trim().toLowerCase();
+    if (answer === "") return;
+
+    let result = null;
+    if (answer.indexOf("accept") !== -1 || answer === "yes") {
+      result = everQuestAccept();
+    } else if (answer.indexOf("deny") !== -1 || answer.indexOf("declin") !== -1 || answer === "no") {
+      result = everQuestDeny();
+    }
+    if (result) state.message = result;
+    return;
+  }
+}
+
+// Runs once per turn (from everPreRolls, before the AI writes).
+// Handles the offer timer, expiring offers, and finishing quests.
+// Returns { notes: [...for the AI], banners: [...for the player] }.
+function everQuestTick() {
+  const out = { notes: [], banners: [] };
+  if (!EVER_CONFIG.features.quests) return out;
+  everQuestInit();
+  const s = state.ever;
+  const Q = EVER_CONFIG.quests;
+
+  // A note left by an accept / deny / abandon
+  if (s.questNote) {
+    out.notes.push(s.questNote);
+    s.questNote = null;
+  }
+
+  if (s.questState === "idle") {
+    // Nothing is waiting or active, so the countdown to the next offer runs
+    s.turnsUntilQuest -= 1;
+    if (s.turnsUntilQuest <= 0) {
+      const index = everPickQuest();
+      if (index === null) {
+        s.turnsUntilQuest = 3;   // nothing suitable right now, so try again soon
+      } else {
+        const def = EVER_CONFIG.questList[index];
+        s.questState = "offered";
+        s.questIndex = index;
+        s.lastQuestIndex = index;
+        s.questStartAction = info.actionCount;
+        out.notes.push("A quest is being offered to the player: \"" + def.name + "\". " + def.prompt +
+          " The task: " + everGoalText(def.goal) + ". The reward: " + everRewardText(def.reward) +
+          ". Narrate someone offering this to the player, and end by leaving the decision to the player." +
+          " Do not assume they accept.");
+        out.banners.push("Quest offered: " + def.name + " (see the Quests card, or type " +
+          Q.acceptCommand + " or " + Q.denyCommand + ")");
+      }
+    }
+
+  } else if (s.questState === "offered") {
+    // An offer that's ignored for too long goes away
+    if (info.actionCount - s.questStartAction >= Q.offerExpiresAfter) {
+      const def = everCurrentQuest();
+      s.questState = "idle";
+      s.questIndex = null;
+      everRestartQuestTimer();
+      if (def) {
+        out.notes.push("The offer of the quest \"" + def.name + "\" has expired, because the player never answered. Mention that the person has moved on.");
+        out.banners.push("Quest offer expired: " + def.name);
+      }
+    }
+
+  } else if (s.questState === "active") {
+    const def = everCurrentQuest();
+    if (def) {
+      const p = everQuestProgress(def);
+      if (p.current >= p.target) {
+        // The quest is done: hand over any items, give the reward, and start the next countdown
+        if (def.goal.type === "collect") s.inventory[def.goal.item] -= def.goal.amount;
+        const rewardText = everApplyReward(def.reward);
+        s.questsCompleted += 1;
+        s.questState = "idle";
+        s.questIndex = null;
+        everRestartQuestTimer();
+        out.notes.push("The player has completed the quest \"" + def.name + "\". Their reward: " +
+          rewardText + ". Narrate them receiving exactly this reward.");
+        out.banners.push("Quest complete: " + def.name + " (" + rewardText + ")");
+      }
+    }
+  }
+  return out;
+}
+
+// The text of the Quests story card
+function everQuestCardText() {
+  everQuestInit();
+  const s = state.ever;
+  const Q = EVER_CONFIG.quests;
+  const lines = [];
+
+  lines.push("Quests completed: " + s.questsCompleted);
+  lines.push("");
+
+  const def = everCurrentQuest();
+  if (s.questState === "offered" && def) {
+    const left = Math.max(0, Q.offerExpiresAfter - (info.actionCount - s.questStartAction));
+    lines.push("QUEST OFFER: " + def.name);
+    lines.push(def.prompt);
+    lines.push("Goal: " + everGoalText(def.goal));
+    lines.push("Reward: " + everRewardText(def.reward));
+    lines.push("This offer expires in " + left + " turns.");
+    lines.push("");
+    lines.push("Decision: ____");
+    lines.push("(Type accept or deny after the word Decision, or use " + Q.acceptCommand + " and " + Q.denyCommand + ".)");
+  } else if (s.questState === "active" && def) {
+    const p = everQuestProgress(def);
+    lines.push("ACTIVE QUEST: " + def.name);
+    lines.push("Goal: " + everGoalText(def.goal));
+    lines.push("Progress: " + Math.min(p.current, p.target) + "/" + p.target);
+    lines.push("Reward: " + everRewardText(def.reward));
+    lines.push("(Type " + Q.abandonCommand + " to give up on it.)");
+  } else {
+    lines.push("No quest right now. A new offer will arrive in time.");
+  }
+  return lines.join("\n");
+}
+
+
+// =====================================================================
+// 8. KILLS AND SALVAGE
+// =====================================================================
+
+// Counts the kill words in the AI's text, up to killDropsPerTurnMax per response.
+function everCountKills(text) {
+  const lower = text.toLowerCase();
+  let kills = 0;
+  for (let i = 0; i < EVER_CONFIG.killWords.length; i++) {
+    // \b means "whole word only", so "skill" won't match "kill"
+    const found = lower.match(new RegExp("\\b" + EVER_CONFIG.killWords[i] + "\\b", "g"));
+    if (found) kills += found.length;
+  }
+  return Math.min(kills, EVER_CONFIG.killDropsPerTurnMax);
+}
+
+// Adds this response's kills to the running total that "kills" quests count.
+function everRecordKills(text) {
+  if (!EVER_CONFIG.features.quests) return;
+  everQuestInit();
+  state.ever.killCount += everCountKills(text);
+}
+
+// Reads the AI's text, counts kill words, and rolls one drop per kill.
+// Returns a list of descriptions like ["Rare drop: 3 x Rope"].
+function everKillTick(text) {
+  if (EVER_CONFIG.lootMode === "timer") return [];
+  if (!EVER_CONFIG.features.drops) return [];
+
+  const kills = everCountKills(text);
+
+  const drops = [];
+  for (let k = 0; k < kills; k++) {
+    const d = everRollLoot("drop");
+    if (d) drops.push(d);
+  }
+  return drops;
+}
+
+// A salvage run: rolls a few random items. Returns the list of descriptions.
+function everSalvageRun() {
+  if (!EVER_CONFIG.features.drops) return [];
+
+  const rolls = everRandom(EVER_CONFIG.salvageRollsMin, EVER_CONFIG.salvageRollsMax);
+  const drops = [];
+  for (let k = 0; k < rolls; k++) {
+    const d = everRollLoot("salvage");
+    if (d) drops.push(d);
+  }
+  return drops;
+}
+
+
+// =====================================================================
+// 9. AI AWARENESS
+// =====================================================================
+
+// Builds a short status note for the AI from the current game state.
+// Returns an empty string if the feature is off.
+function everStatusNote() {
+  const cfg = EVER_CONFIG;
+  const f = cfg.features;
+  const s = state.ever;
+  if (!f.aiAwareness) return "";
+
+  const parts = [];   // pieces of the note, joined at the end
+
+  // Base
+  if (f.baseUpgrades) {
+    const tier = everTierName(s.baseLevel);
+    parts.push("Home: " + tier + " (level " + s.baseLevel + ")");
+  }
+
+  // Stats, with warnings when they run low
+  if (f.health) {
+    parts.push("Health " + s.health + "/" + cfg.startHealth +
+      (s.health <= 0 ? " (the player is dying)" :
+       s.health <= cfg.lowHealth ? " (badly hurt)" : ""));
+  }
+  if (f.thirst) {
+    parts.push("Thirst " + s.thirst + "/" + cfg.startThirst +
+      (s.thirst <= 0 ? " (desperately dehydrated)" :
+       s.thirst <= cfg.lowThirst ? " (very thirsty)" : ""));
+  }
+  if (f.hunger) {
+    parts.push("Hunger " + s.hunger + "/" + cfg.startHunger +
+      (s.hunger <= 0 ? " (starving)" :
+       s.hunger <= cfg.lowHunger ? " (very hungry)" : ""));
+  }
+
+  if (everHasEngine()) {
+    parts.push("Power " + s.power + "/" + everPowerMax() +
+      (s.power <= 0 ? " (power is out: the " + cfg.engine.name.toLowerCase() + ", lights and powered weapons are offline)" :
+       s.power <= cfg.engine.lowPower ? " (running low)" : ""));
+  }
+
+  // The quest the player is working on, if any
+  if (f.quests && s.questState === "active") {
+    const questDef = everCurrentQuest();
+    if (questDef) {
+      const qp = everQuestProgress(questDef);
+      parts.push("Active quest: " + questDef.name + " (" + everGoalText(questDef.goal) +
+        ", progress " + Math.min(qp.current, qp.target) + "/" + qp.target + ")");
+    }
+  }
+
+  // Ship weapons: mounted ones go offline when the engine has no power
+  if (f.weaponSlots && everWeaponSlots() > 0) {
+    const mounted = everEquippedList();
+    const offline = f.engine && !(everHasEngine() && s.power > 0);
+    parts.push("Ship weapons mounted (" + mounted.length + "/" + everWeaponSlots() + "): " +
+      (mounted.length > 0 ? mounted.join(", ") + (offline ? " (offline: no power)" : "") : "none"));
+  }
+
+  // Inventory: only items the player actually has, up to the limit
+  if (f.inventory) {
+    const held = [];
+    for (const name in s.inventory) {
+      if (s.inventory[name] > 0 && held.length < cfg.awarenessMaxItems) {
+        held.push(name + " x" + s.inventory[name]);
+      }
+    }
+    parts.push("Carrying: " + (held.length > 0 ? held.join(", ") : "nothing"));
+  }
+
+  return "[Player status. " + parts.join(". ") +
+    ". Treat this as true and do not invent items the player does not have.]";
+}
+
+
+// =====================================================================
+// 10. EVENTS
+// =====================================================================
+
+// Picks a random event (using the weights), applies its effects,
+// and returns a summary: { name, prompt, results }
+function everRollEvent() {
+  const cfg = EVER_CONFIG;
+  const s = state.ever;
+
+  // Build a list of just the weights, then pick one using the weighted picker
+  const weights = cfg.events.map(function (e) { return e.weight; });
+  const ev = cfg.events[everWeightedIndex(weights)];
+
+  const results = [];   // plain-language list of what happened to the player
+
+  // Health change (only if the health feature is on), kept between 0 and full
+  if (ev.healthChange && cfg.features.health) {
+    s.health = Math.max(0, Math.min(cfg.startHealth, s.health + ev.healthChange));
+    results.push("health " + (ev.healthChange > 0 ? "+" : "") + ev.healthChange);
+  }
+
+  // Thirst change (only if the thirst feature is on)
+  if (ev.thirstChange && cfg.features.thirst) {
+    s.thirst = Math.max(0, Math.min(cfg.startThirst, s.thirst + ev.thirstChange));
+    results.push("thirst " + (ev.thirstChange > 0 ? "+" : "") + ev.thirstChange);
+  }
+
+  // Free loot: roll the same loot system used by chests
+  if (ev.lootRolls) {
+    for (let i = 0; i < ev.lootRolls; i++) {
+      const drop = everRollLoot("reward");
+      if (drop) results.push(drop);
+    }
+  }
+
+  s.lastEvent = ev.name;
+  return { name: ev.name, prompt: ev.prompt, results: results };
+}
+
+// Counts down the event timer. Returns the event if one fired, otherwise null.
+function everEventTick() {
+  if (!EVER_CONFIG.features.events) return null;
+  const s = state.ever;
+
+  // Adventures started before events existed don't have this timer, so create it on first use
+  if (s.turnsUntilEvent === undefined) {
+    s.turnsUntilEvent = everRandom(EVER_CONFIG.eventMin, EVER_CONFIG.eventMax);
+  }
+
+  s.turnsUntilEvent -= 1;
+  if (s.turnsUntilEvent > 0) return null;   // not time yet
+
+  // Time's up: restart the timer and roll an event
+  s.turnsUntilEvent = everRandom(EVER_CONFIG.eventMin, EVER_CONFIG.eventMax);
+  return everRollEvent();
+}
+
+
+// =====================================================================
+// 11. SAME-TURN ROLLS
+// =====================================================================
+
+// Called from the Context tab, once per turn, BEFORE the AI writes.
+// Rolls the timed chest and the random event, and collects any salvage haul,
+// then returns one note for the AI ("" if nothing happened). The AI therefore
+// narrates the real contents in the same response instead of inventing them.
+function everPreRolls() {
+  const s = state.ever;
+  if (s.dead) return "";   // the game is frozen once the player is dead
+
+  // Retry (or any repeat of the same turn): reuse the saved note, don't roll again
+  if (s.preRollAction === info.actionCount) return s.preRollNote || "";
+
+  s.preRollAction = info.actionCount;   // remember which turn we rolled for
+  const notes = [];     // text for the AI
+  const banners = [];   // text for the banner the player sees
+
+  // Salvage haul that the Input tab rolled when the player typed /salvage
+  if (s.salvageNote) {
+    notes.push("The player is out on a salvage run and finds: " + s.salvageNote +
+      ". Narrate exactly these finds.");
+    banners.push("Salvage: " + s.salvageNote);
+    s.salvageNote = null;
+  }
+
+  // Timed chest
+  if (everChestTick()) {
+    notes.push("The player has just found a chest containing: " + s.lastLoot +
+      ". Narrate exactly these contents.");
+    banners.push("A chest appeared! " + s.lastLoot);
+  }
+
+  // Random event
+  const ev = everEventTick();
+  if (ev) {
+    const effects = ev.results.length > 0 ? ev.results.join(", ") : "";
+    notes.push("Event: " + ev.name + ". " + ev.prompt +
+      (effects ? " Effects on the player: " + effects + "." : "") +
+      " Narrate this happening right now.");
+    banners.push("Event: " + ev.name + (effects ? " (" + effects + ")" : ""));
+  }
+
+  // Quests: new offers, expired offers, finished quests, and accept/deny notes
+  const quest = everQuestTick();
+  for (let i = 0; i < quest.notes.length; i++) notes.push(quest.notes[i]);
+  for (let i = 0; i < quest.banners.length; i++) banners.push(quest.banners[i]);
+
+  if (banners.length > 0) state.message = banners.join(" | ");
+  s.preRollNote = notes.join(" ");   // saved so a Retry can reuse it
+  return s.preRollNote;
+}
+
+
+// =====================================================================
+// 12. DEATH
+// =====================================================================
+
+// Checks whether the player has just died. Returns true only on the turn it happens,
+// so the death is announced once and not every turn afterward.
+function everDeathCheck() {
+  if (!EVER_CONFIG.features.death || !EVER_CONFIG.features.health) return false;
+  const s = state.ever;
+  if (s.dead) return false;       // already dead, nothing new to announce
+  if (s.health > 0) return false; // still alive
+  s.dead = true;                  // the flag that triggers the Cliffhangar death ending
+  return true;
+}
